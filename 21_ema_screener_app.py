@@ -1,66 +1,63 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import requests
 from io import StringIO
 
 # -------------------------------------------------
-# 21EMA Screener  –  Streamlit Web App (v0.2)
+# 21EMA Screener  –  Streamlit Web App (v0.4)
 # -------------------------------------------------
-# * 改修点 *
-#   • S&P500 のティッカー取得先を constituents.csv に変更（URL修正）
-#   • requests + User-Agent 付きでダウンロード → 403/404 回避
-#   • 取得失敗時は警告を出してスキップ（アプリは落とさない）
+# • NASDAQ‑100 / Russell2000: Wikipedia & NasdaqTrader のみ使用 (404 URL 完全撤廃)
+# • DataFrame 代入時の ValueError を防ぐため assign() に書き換え
 # -------------------------------------------------
 
 st.set_page_config(page_title="21EMA Screener", layout="wide")
 st.title("📈 21EMA 成長株スクリーナー")
-st.markdown("条件：21EMA乖離 ±5%、ATR% 3〜5%、出来高50日平均 > 10万株、MA順序チェック")
+st.caption("条件：21EMA乖離 ±5%、ATR% 3〜5%、出来高50日平均 > 10万株、MA順序チェック")
 
 # -------------------------------------------------
-# ユーティリティ
+# ティッカー取得ユーティリティ
 # -------------------------------------------------
 
-def fetch_tickers_from_url(url: str, column: str | None = None) -> list[str]:
-    """指定URLからCSV/TSVをダウンロードし、ティッカーのリストを返す。"""
+def _clean(series: pd.Series) -> list[str]:
+    return (
+        series.astype(str)
+        .str.upper()
+        .str.replace(".", "-", regex=False)
+        .str.strip()
+        .dropna()
+        .tolist()
+    )
+
+def fetch_wikipedia_tickers(url: str, possible_cols: list[str]) -> list[str]:
     try:
-        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        content = StringIO(resp.text)
-        if column:
-            df = pd.read_csv(content)
-            return (
-                df[column]
-                .astype(str)
-                .str.upper()
-                .str.replace(".", "-", regex=False)
-                .dropna()
-                .tolist()
-            )
-        else:
-            # header=None の場合は 1 列目をティッカーとみなす
-            return (
-                pd.read_csv(content, header=None)[0]
-                .astype(str)
-                .str.upper()
-                .str.replace(".", "-", regex=False)
-                .dropna()
-                .tolist()
-            )
-    except Exception as e:
-        st.warning(f"⚠️ ティッカー取得失敗: {url} → {e}")
+        tables = pd.read_html(url)
+        for tbl in tables:
+            for col in possible_cols:
+                if col in tbl.columns:
+                    return _clean(tbl[col])
+        st.warning(f"⚠️ Wikipediaページに列が見つかりません: {url}")
         return []
+    except Exception as e:
+        st.warning(f"⚠️ Wikipedia取得失敗: {url} → {e}")
+        return []
+
+def fetch_russell2000() -> list[str]:
+    txt_url = "https://www.nasdaqtrader.com/dynamic/SymDir/russell2000.txt"
+    try:
+        txt = requests.get(txt_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).text
+        rows = [line.split("|")[0] for line in txt.splitlines() if "|" in line]
+        return _clean(pd.Series(rows[1:]))
+    except Exception:
+        # フォールバック: Wikipedia
+        return fetch_wikipedia_tickers("https://en.wikipedia.org/wiki/Russell_2000_Index", ["Ticker", "Symbol"])
 
 @st.cache_data(show_spinner=False)
 def load_ticker_lists() -> list[str]:
-    """S&P500 / NASDAQ100 / Russell2000 のティッカーを結合して返す"""
-    sp500_url = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
-    nasdaq100_url = "https://raw.githubusercontent.com/raphaelmoritz/nasdaq100-list/main/nasdaq100.csv"
-    russell_url = "https://raw.githubusercontent.com/rohan-paul/Misc-datasets/main/russell2000.csv"
-
-    sp500 = fetch_tickers_from_url(sp500_url, column="Symbol")
-    nasdaq100 = fetch_tickers_from_url(nasdaq100_url, column="Symbol")
-    russell2000 = fetch_tickers_from_url(russell_url, column="Ticker")
+    sp500 = fetch_wikipedia_tickers("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", ["Symbol", "Ticker"])
+    nasdaq100 = fetch_wikipedia_tickers("https://en.wikipedia.org/wiki/NASDAQ-100", ["Ticker", "Symbol"])
+    russell2000 = fetch_russell2000()
 
     tickers = sorted(set(sp500 + nasdaq100 + russell2000))
     if not tickers:
@@ -74,9 +71,12 @@ def load_ticker_lists() -> list[str]:
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["21EMA"] = df["Close"].ewm(span=21).mean()
-    df["ATR"] = df["High"] - df["Low"]
-    df["ATR_21"] = df["ATR"].rolling(window=21).mean()
-    df["ATR_pct"] = df["ATR_21"] / df["Close"] * 100
+
+    prev_close = df["Close"].shift()
+    tr = np.maximum(df["High"] - df["Low"], np.maximum(abs(df["High"] - prev_close), abs(df["Low"] - prev_close)))
+    df["ATR_21"] = tr.rolling(window=21, min_periods=1).mean()
+    df = df.assign(ATR_pct=(df["ATR_21"] / df["Close"]).mul(100))
+
     df["10SMA"] = df["Close"].rolling(window=10).mean()
     df["50SMA"] = df["Close"].rolling(window=50).mean()
     df["150SMA"] = df["Close"].rolling(window=150).mean()
@@ -92,15 +92,15 @@ def get_data(ticker: str):
     return calculate_technical_indicators(df)
 
 # -------------------------------------------------
-# UI コンポーネント
+# UI
 # -------------------------------------------------
 ema_min, ema_max = st.slider("21EMA乖離率 (%)", -10.0, 10.0, (-5.0, 5.0), 0.1)
-atr_min, atr_max = st.slider("21日ATR%", 0.0, 10.0, (3.0, 5.0), 0.1)
-vol_threshold = st.number_input("出来高 (50日平均、株数)", value=100000, step=10000)
+atr_min, atr_max = st.slider("21日ATR%", 0.0, 15.0, (3.0, 5.0), 0.1)
+vol_threshold = st.number_input("出来高 (50日平均, 株数)", value=100000, step=10000, format="%d")
 run_button = st.button("🔍 スクリーニング実行")
 
 # -------------------------------------------------
-# スクリーニング処理
+# メイン処理
 # -------------------------------------------------
 if run_button:
     tickers = load_ticker_lists()
@@ -108,45 +108,42 @@ if run_button:
         st.stop()
 
     st.info(f"対象ティッカー数: {len(tickers)} 件 – データ取得には数分かかる場合があります。")
-    progress = st.progress(0.0, text="スクリーニング中...")
+    prog = st.progress(0.0)
 
     results = []
-    for i, ticker in enumerate(tickers):
-        progress.progress((i + 1) / len(tickers), text=f"{ticker} 処理中…")
-        df = get_data(ticker)
+    for i, tic in enumerate(tickers):
+        prog.progress((i + 1) / len(tickers), text=f"{tic} 取得中…")
+        df = get_data(tic)
         if df is None:
             continue
         row = df.iloc[-1]
 
         gap_pct = (row["Close"] - row["21EMA"]) / row["21EMA"] * 100
-        if not (ema_min <= gap_pct <= ema_max):
-            continue
-        if not (atr_min <= row["ATR_pct"] <= atr_max):
-            continue
-        if not (row["50SMA"] > row["150SMA"] > row["200SMA"]):
-            continue
-        if not (row["10SMA"] > row["21EMA"] > row["50SMA"]):
-            continue
-        if row["Vol50Avg"] < vol_threshold:
+        conds = [
+            ema_min <= gap_pct <= ema_max,
+            atr_min <= row["ATR_pct"] <= atr_max,
+            row["50SMA"] > row["150SMA"] > row["200SMA"],
+            row["10SMA"] > row["21EMA"] > row["50SMA"],
+            row["Vol50Avg"] >= vol_threshold,
+        ]
+        if not all(conds):
             continue
 
         results.append({
-            "Ticker": ticker,
+            "Ticker": tic,
             "Close": row["Close"],
             "EMA Gap%": round(gap_pct, 2),
             "ATR%": round(row["ATR_pct"], 2),
-            "Vol50Avg": int(row["Vol50Avg"])
+            "Vol50Avg": int(row["Vol50Avg"]),
         })
 
-    progress.empty()
-
+    prog.empty()
     st.success(f"スクリーニング完了：{len(results)} 件ヒット")
-    if results:
-        df_out = pd.DataFrame(results).sort_values("ATR%", ascending=False)
-        st.dataframe(df_out, use_container_width=True)
-        st.download_button("CSVをダウンロード", df_out.to_csv(index=False).encode("utf-8"), "screened.csv")
 
-        ticker_list = ",".join(df_out["Ticker"].tolist())
-        st.code(ticker_list, language="text")
+    if results:
+        out = pd.DataFrame(results).sort_values("ATR%", ascending=False)
+        st.dataframe(out, use_container_width=True)
+        st.download_button("CSVをダウンロード", out.to_csv(index=False).encode("utf-8"), "screened.csv")
+        st.code(",".join(out["Ticker"].tolist()), language="text")
     else:
         st.warning("条件に一致する銘柄がありませんでした。")
