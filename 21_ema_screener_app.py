@@ -32,7 +32,7 @@ def _clean(series: pd.Series) -> list[str]:
 
 def fetch_wikipedia_tickers(url: str, possible_cols: list[str]) -> list[str]:
     try:
-        tables = pd.read_html(url)
+        tables = pd.read_html(url, flavor="lxml")
         for tbl in tables:
             for col in possible_cols:
                 if col in tbl.columns:
@@ -41,6 +41,7 @@ def fetch_wikipedia_tickers(url: str, possible_cols: list[str]) -> list[str]:
         return []
     except Exception as e:
         st.warning(f"⚠️ Wikipedia取得失敗: {url} → {e}")
+        st.exception(e)
         return []
 
 def fetch_russell2000() -> list[str]:
@@ -50,10 +51,9 @@ def fetch_russell2000() -> list[str]:
         rows = [line.split("|")[0] for line in txt.splitlines() if "|" in line]
         return _clean(pd.Series(rows[1:]))
     except Exception:
-        # フォールバック: Wikipedia
         return fetch_wikipedia_tickers("https://en.wikipedia.org/wiki/Russell_2000_Index", ["Ticker", "Symbol"])
 
-@st.cache_data(show_spinner=False)
+# @st.cache_data(show_spinner=False)
 def load_ticker_lists() -> list[str]:
     sp500 = fetch_wikipedia_tickers("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", ["Symbol", "Ticker"])
     nasdaq100 = fetch_wikipedia_tickers("https://en.wikipedia.org/wiki/NASDAQ-100", ["Ticker", "Symbol"])
