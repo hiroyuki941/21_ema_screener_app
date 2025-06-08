@@ -6,10 +6,11 @@ import requests
 from io import StringIO
 
 # -------------------------------------------------
-# 21EMA Screener  –  Streamlit Web App (v0.4)
+# 21EMA Screener  –  Streamlit Web App (v0.4.1)
 # -------------------------------------------------
 # • NASDAQ‑100 / Russell2000: Wikipedia & NasdaqTrader のみ使用 (404 URL 完全撤廃)
-# • DataFrame 代入時の ValueError を防ぐため assign() に書き換え
+# • ValueError: Length mismatch 対策で assign() ではなく直接代入へ変更
+# • MultiIndex 対応: yfinance の戻り値が MultiIndex の場合に droplevel 対応
 # -------------------------------------------------
 
 st.set_page_config(page_title="21EMA Screener", layout="wide")
@@ -75,7 +76,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     prev_close = df["Close"].shift()
     tr = np.maximum(df["High"] - df["Low"], np.maximum(abs(df["High"] - prev_close), abs(df["Low"] - prev_close)))
     df["ATR_21"] = tr.rolling(window=21, min_periods=1).mean()
-    df = df.assign(ATR_pct=(df["ATR_21"] / df["Close"]).mul(100))
+    df["ATR_pct"] = (df["ATR_21"] / df["Close"]) * 100
 
     df["10SMA"] = df["Close"].rolling(window=10).mean()
     df["50SMA"] = df["Close"].rolling(window=50).mean()
@@ -89,6 +90,8 @@ def get_data(ticker: str):
     df = yf.download(ticker, period="1y", progress=False, auto_adjust=True, threads=False)
     if df.empty or len(df) < 200:
         return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(0)
     return calculate_technical_indicators(df)
 
 # -------------------------------------------------
