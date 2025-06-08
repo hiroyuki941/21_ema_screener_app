@@ -6,11 +6,12 @@ import requests
 from io import StringIO
 
 # -------------------------------------------------
-# 21EMA Screener  –  Streamlit Web App (v0.4.1)
+# 21EMA Screener  –  Streamlit Web App (v0.4.1)（修正版）
 # -------------------------------------------------
 # • NASDAQ‑100 / Russell2000: Wikipedia & NasdaqTrader のみ使用 (404 URL 完全撤廃)
 # • ValueError: Length mismatch 対策で assign() ではなく直接代入へ変更
 # • MultiIndex 対応: yfinance の戻り値が MultiIndex の場合に droplevel 対応
+# • 'Close'カラムの存在チェックを追加
 # -------------------------------------------------
 
 st.set_page_config(page_title="21EMA Screener", layout="wide")
@@ -90,8 +91,28 @@ def get_data(ticker: str):
     df = yf.download(ticker, period="1y", progress=False, auto_adjust=True, threads=False)
     if df.empty or len(df) < 200:
         return None
+
+    # MultiIndex対応
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(0)
+        # yfinanceの仕様により、1階層に落とす
+        # 通常は (項目, ティッカー) となっているので、最初の階層を落とす
+        try:
+            df.columns = df.columns.droplevel(0)
+        except Exception:
+            # droplevelできない場合はそのまま
+            pass
+
+    # 'Close'カラムの存在チェック
+    if "Close" not in df.columns:
+        st.warning(f"{ticker}: 'Close'カラムがありません。取得カラム: {list(df.columns)}")
+        return None
+
+    # 必要なカラムが揃っているかチェック
+    for col in ["High", "Low", "Volume"]:
+        if col not in df.columns:
+            st.warning(f"{ticker}: '{col}'カラムがありません。取得カラム: {list(df.columns)}")
+            return None
+
     return calculate_technical_indicators(df)
 
 # -------------------------------------------------
